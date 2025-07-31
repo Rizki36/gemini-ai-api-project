@@ -1,8 +1,4 @@
-import { config } from "dotenv";
 import { cleanEnv, port, str } from "envalid";
-
-// Load environment variables from .env file
-config();
 
 // Validate environment variables
 export const env = cleanEnv(process.env, {
