@@ -1,45 +1,14 @@
 import type { Part } from "@google/generative-ai";
 import { GoogleGenerativeAI } from "@google/generative-ai";
-import cors from "cors";
-import type { Request, Response } from "express";
-import express from "express";
-import multer from "multer";
+import type { Serve } from "bun";
 import env from "./config";
 
 const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
-
-const app = express();
-const port = env.PORT;
 
 // Define interfaces for request bodies
 interface TextRequest {
 	text: string;
 }
-
-interface FileRequest extends Request {
-	file?: Express.Multer.File;
-}
-
-// Middleware
-app.use(cors());
-app.use(express.json());
-
-// Configure multer for file uploads
-const storage = multer.memoryStorage();
-const upload = multer({
-	storage,
-	fileFilter: (
-		_req: Express.Request,
-		_file: Express.Multer.File,
-		cb: multer.FileFilterCallback,
-	) => {
-		// We'll handle specific file type validation in each route
-		cb(null, true);
-	},
-	limits: {
-		fileSize: 10 * 1024 * 1024, // 10MB limit
-	},
-});
 
 // Helper function to convert file buffer to base64
 function fileToGenerativePart(buffer: Buffer, mimeType: string): Part {
@@ -51,219 +20,315 @@ function fileToGenerativePart(buffer: Buffer, mimeType: string): Part {
 	};
 }
 
-// Endpoint 1: Generate text from prompt
-app.post("/api/generate-text", async (req, res) => {
-	try {
-		const { text } = req.body;
+// Create Bun server
+const server = Bun.serve({
+	port: env.PORT,
+	async fetch(req) {
+		const url = new URL(req.url);
 
-		// Validate required fields
-		if (!text) {
-			return res.status(400).json({ error: "Text prompt is required" });
+		// CORS headers
+		const headers = new Headers({
+			"Access-Control-Allow-Origin": "*",
+			"Access-Control-Allow-Methods": "GET, POST, PUT, DELETE, OPTIONS",
+			"Access-Control-Allow-Headers": "Content-Type, Authorization",
+		});
+
+		// Handle CORS preflight requests
+		if (req.method === "OPTIONS") {
+			return new Response(null, { headers });
 		}
 
-		// Use the text-only model
-		const model = genAI.getGenerativeModel({ model: env.GEMINI_MODEL });
+		// Only handle POST requests
+		if (req.method !== "POST") {
+			return new Response(JSON.stringify({ error: "Method not allowed" }), {
+				status: 405,
+				headers: { ...headers, "Content-Type": "application/json" },
+			});
+		}
 
-		const result = await model.generateContent(text);
-		const response = result.response;
+		// Route handling
+		try {
+			if (url.pathname === "/api/generate-text") {
+				return await handleGenerateText(req, headers);
+			}
+			if (url.pathname === "/api/generate-from-image") {
+				return await handleGenerateFromImage(req, headers);
+			}
+			if (url.pathname === "/api/generate-from-document") {
+				return await handleGenerateFromDocument(req, headers);
+			}
+			if (url.pathname === "/api/generate-from-audio") {
+				return await handleGenerateFromAudio(req, headers);
+			}
 
-		res.json({
+			// Return 404 for unknown routes
+			return new Response(JSON.stringify({ error: "Route not found" }), {
+				status: 404,
+				headers: { ...headers, "Content-Type": "application/json" },
+			});
+		} catch (error) {
+			console.error("Error handling request:", error);
+			return new Response(
+				JSON.stringify({
+					success: false,
+					error: "Internal server error",
+				}),
+				{
+					status: 500,
+					headers: { ...headers, "Content-Type": "application/json" },
+				},
+			);
+		}
+	},
+});
+
+console.log(`Server is running on port ${server.port}`);
+
+// Handler for generate-text endpoint
+async function handleGenerateText(req: Request, headers: Headers) {
+	const contentType = req.headers.get("Content-Type") || "";
+
+	if (!contentType.includes("application/json")) {
+		return new Response(
+			JSON.stringify({ error: "Content type must be application/json" }),
+			{
+				status: 400,
+				headers: { ...headers, "Content-Type": "application/json" },
+			},
+		);
+	}
+
+	const body = await req.json();
+	const { text } = body as TextRequest;
+
+	// Validate required fields
+	if (!text) {
+		return new Response(JSON.stringify({ error: "Text prompt is required" }), {
+			status: 400,
+			headers: { ...headers, "Content-Type": "application/json" },
+		});
+	}
+
+	// Use the text-only model
+	const model = genAI.getGenerativeModel({ model: env.GEMINI_MODEL });
+
+	const result = await model.generateContent(text);
+	const response = result.response;
+
+	return new Response(
+		JSON.stringify({
 			success: true,
 			data: response.text(),
 			model: env.GEMINI_MODEL,
-		});
-	} catch (error) {
-		console.error("Error generating text:", error);
-		res.status(500).json({
-			success: false,
-			error: "Failed to generate text",
+		}),
+		{
+			status: 200,
+			headers: { ...headers, "Content-Type": "application/json" },
+		},
+	);
+}
+
+// Handler for generate-from-image endpoint
+async function handleGenerateFromImage(req: Request, headers: Headers) {
+	const formData = await req.formData();
+	const text = formData.get("text")?.toString();
+	const imageFile = formData.get("image") as File | null;
+
+	// Validate required fields
+	if (!text) {
+		return new Response(JSON.stringify({ error: "Text prompt is required" }), {
+			status: 400,
+			headers: { ...headers, "Content-Type": "application/json" },
 		});
 	}
-});
 
-// Endpoint 2: Generate content from image and text
-app.post(
-	"/api/generate-from-image",
-	upload.single("image"),
-	async (req: FileRequest, res: Response) => {
-		try {
-			const imageFile = req.file;
-			const { text } = req.body as TextRequest;
+	if (!imageFile) {
+		return new Response(JSON.stringify({ error: "Image file is required" }), {
+			status: 400,
+			headers: { ...headers, "Content-Type": "application/json" },
+		});
+	}
 
-			// Validate required fields
-			if (!text) {
-				return res.status(400).json({ error: "Text prompt is required" });
-			}
+	// Validate image type
+	const allowedImageTypes = [
+		"image/jpeg",
+		"image/png",
+		"image/webp",
+		"image/heic",
+		"image/heif",
+	];
 
-			if (!imageFile) {
-				return res.status(400).json({ error: "Image file is required" });
-			}
+	if (!allowedImageTypes.includes(imageFile.type)) {
+		return new Response(
+			JSON.stringify({
+				error:
+					"Invalid image format. Supported formats: JPEG, PNG, WEBP, HEIC, HEIF",
+			}),
+			{
+				status: 400,
+				headers: { ...headers, "Content-Type": "application/json" },
+			},
+		);
+	}
 
-			// Validate image type
-			const allowedImageTypes = [
-				"image/jpeg",
-				"image/png",
-				"image/webp",
-				"image/heic",
-				"image/heif",
-			];
-			if (!allowedImageTypes.includes(imageFile.mimetype)) {
-				return res.status(400).json({
-					error:
-						"Invalid image format. Supported formats: JPEG, PNG, WEBP, HEIC, HEIF",
-				});
-			}
+	// Use the multimodal model
+	const model = genAI.getGenerativeModel({
+		model: env.GEMINI_VISION_MODEL,
+	});
 
-			// Use the multimodal model
-			const model = genAI.getGenerativeModel({
-				model: env.GEMINI_VISION_MODEL,
-			});
+	const imageBuffer = Buffer.from(await imageFile.arrayBuffer());
+	const imagePart = fileToGenerativePart(imageBuffer, imageFile.type);
 
-			const imagePart = fileToGenerativePart(
-				imageFile.buffer,
-				imageFile.mimetype,
-			);
+	const result = await model.generateContent([text, imagePart]);
+	const response = await result.response;
 
-			const result = await model.generateContent([text, imagePart]);
-			const response = await result.response;
+	return new Response(
+		JSON.stringify({
+			success: true,
+			data: response.text(),
+			model: env.GEMINI_VISION_MODEL,
+		}),
+		{
+			status: 200,
+			headers: { ...headers, "Content-Type": "application/json" },
+		},
+	);
+}
 
-			res.json({
-				success: true,
-				data: response.text(),
-				model: env.GEMINI_VISION_MODEL,
-			});
-		} catch (error) {
-			console.error("Error generating from image:", error);
-			res.status(500).json({
-				success: false,
-				error: "Failed to generate content from image",
-			});
-		}
-	},
-);
+// Handler for generate-from-document endpoint
+async function handleGenerateFromDocument(req: Request, headers: Headers) {
+	const formData = await req.formData();
+	const text = formData.get("text")?.toString();
+	const documentFile = formData.get("document") as File | null;
 
-// Endpoint 3: Generate from document and text
-app.post(
-	"/api/generate-from-document",
-	upload.single("document"),
-	async (req: FileRequest, res: Response) => {
-		try {
-			const documentFile = req.file;
-			const { text } = req.body as TextRequest;
+	// Validate required fields
+	if (!text) {
+		return new Response(JSON.stringify({ error: "Text prompt is required" }), {
+			status: 400,
+			headers: { ...headers, "Content-Type": "application/json" },
+		});
+	}
 
-			// Validate required fields
-			if (!text) {
-				return res.status(400).json({ error: "Text prompt is required" });
-			}
+	if (!documentFile) {
+		return new Response(
+			JSON.stringify({ error: "Document file is required" }),
+			{
+				status: 400,
+				headers: { ...headers, "Content-Type": "application/json" },
+			},
+		);
+	}
 
-			if (!documentFile) {
-				return res.status(400).json({ error: "Document file is required" });
-			}
+	// Validate document type
+	const allowedDocumentTypes = [
+		"application/pdf",
+		"application/msword",
+		"application/vnd.openxmlformats-officedocument.wordprocessingml.document", // docx
+		"text/plain",
+		"text/markdown",
+	];
 
-			// Validate document type
-			const allowedDocumentTypes = [
-				"application/pdf",
-				"application/msword",
-				"application/vnd.openxmlformats-officedocument.wordprocessingml.document", // docx
-				"text/plain",
-				"text/markdown",
-			];
+	if (!allowedDocumentTypes.includes(documentFile.type)) {
+		return new Response(
+			JSON.stringify({
+				error:
+					"Invalid document format. Supported formats: PDF, DOC, DOCX, TXT, MD",
+			}),
+			{
+				status: 400,
+				headers: { ...headers, "Content-Type": "application/json" },
+			},
+		);
+	}
 
-			if (!allowedDocumentTypes.includes(documentFile.mimetype)) {
-				return res.status(400).json({
-					error:
-						"Invalid document format. Supported formats: PDF, DOC, DOCX, TXT, MD",
-				});
-			}
+	const model = genAI.getGenerativeModel({ model: env.GEMINI_MODEL });
 
-			const model = genAI.getGenerativeModel({ model: env.GEMINI_MODEL });
+	const documentPrompt = `
+    Document name: ${documentFile.name}
+    Document type: ${documentFile.type}
+    User prompt: ${text}
+    Process this document according to the user's request.`;
 
-			const documentPrompt = `Document name: ${documentFile.originalname}
-Document type: ${documentFile.mimetype}
-User prompt: ${text}
+	const result = await model.generateContent(documentPrompt);
+	const response = result.response;
 
-Process this document according to the user's request.`;
+	return new Response(
+		JSON.stringify({
+			success: true,
+			data: response.text(),
+			model: env.GEMINI_MODEL,
+		}),
+		{
+			status: 200,
+			headers: { ...headers, "Content-Type": "application/json" },
+		},
+	);
+}
 
-			const result = await model.generateContent(documentPrompt);
-			const response = result.response;
+// Handler for generate-from-audio endpoint
+async function handleGenerateFromAudio(req: Request, headers: Headers) {
+	const formData = await req.formData();
+	const text = formData.get("text")?.toString();
+	const audioFile = formData.get("audio") as File | null;
 
-			res.json({
-				success: true,
-				data: response.text(),
-				model: env.GEMINI_MODEL,
-			});
-		} catch (error) {
-			console.error("Error generating from document:", error);
-			res.status(500).json({
-				success: false,
-				error: "Failed to generate content from document",
-			});
-		}
-	},
-);
+	// Validate required fields
+	if (!text) {
+		return new Response(JSON.stringify({ error: "Text prompt is required" }), {
+			status: 400,
+			headers: { ...headers, "Content-Type": "application/json" },
+		});
+	}
 
-// Endpoint 4: Generate from audio and text
-app.post(
-	"/api/generate-from-audio",
-	upload.single("audio"),
-	async (req: FileRequest, res: Response) => {
-		try {
-			const audioFile = req.file;
-			const { text } = req.body as TextRequest;
+	if (!audioFile) {
+		return new Response(JSON.stringify({ error: "Audio file is required" }), {
+			status: 400,
+			headers: { ...headers, "Content-Type": "application/json" },
+		});
+	}
 
-			// Validate required fields
-			if (!text) {
-				return res.status(400).json({ error: "Text prompt is required" });
-			}
+	// Validate audio type
+	const allowedAudioTypes = [
+		"audio/mpeg", // mp3
+		"audio/mp4",
+		"audio/wav",
+		"audio/ogg",
+		"audio/webm",
+	];
 
-			if (!audioFile) {
-				return res.status(400).json({ error: "Audio file is required" });
-			}
+	if (!allowedAudioTypes.includes(audioFile.type)) {
+		return new Response(
+			JSON.stringify({
+				error:
+					"Invalid audio format. Supported formats: MP3, MP4, WAV, OGG, WEBM",
+			}),
+			{
+				status: 400,
+				headers: { ...headers, "Content-Type": "application/json" },
+			},
+		);
+	}
 
-			// Validate audio type
-			const allowedAudioTypes = [
-				"audio/mpeg", // mp3
-				"audio/mp4",
-				"audio/wav",
-				"audio/ogg",
-				"audio/webm",
-			];
+	const model = genAI.getGenerativeModel({ model: env.GEMINI_MODEL });
 
-			if (!allowedAudioTypes.includes(audioFile.mimetype)) {
-				return res.status(400).json({
-					error:
-						"Invalid audio format. Supported formats: MP3, MP4, WAV, OGG, WEBM",
-				});
-			}
+	const audioPrompt = `
+    Audio file name: ${audioFile.name}
+    Audio type: ${audioFile.type}
+    File size: ${audioFile.size} bytes
+    User prompt: ${text}
+    Process this audio according to the user's request.`;
 
-			const model = genAI.getGenerativeModel({ model: env.GEMINI_MODEL });
+	const result = await model.generateContent(audioPrompt);
+	const response = result.response;
 
-			const audioPrompt = `Audio file name: ${audioFile.originalname}
-Audio type: ${audioFile.mimetype}
-File size: ${audioFile.size} bytes
-User prompt: ${text}
-
-Process this audio according to the user's request.`;
-
-			const result = await model.generateContent(audioPrompt);
-			const response = result.response;
-
-			res.json({
-				success: true,
-				data: response.text(),
-				model: env.GEMINI_MODEL,
-			});
-		} catch (error) {
-			console.error("Error generating from audio:", error);
-			res.status(500).json({
-				success: false,
-				error: "Failed to generate content from audio",
-			});
-		}
-	},
-);
-
-// Start the server
-app.listen(port, () => {
-	console.log(`Server is running on port ${port}`);
-});
+	return new Response(
+		JSON.stringify({
+			success: true,
+			data: response.text(),
+			model: env.GEMINI_MODEL,
+		}),
+		{
+			status: 200,
+			headers: { ...headers, "Content-Type": "application/json" },
+		},
+	);
+}
