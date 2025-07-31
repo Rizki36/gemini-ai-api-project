@@ -48,8 +48,8 @@ bun run lint:fix
 | Variable | Description | Default Value |
 |----------|-------------|---------------|
 | `GEMINI_API_KEY` | Your Google Gemini API key (required) | none |
-| `GEMINI_MODEL` | The Gemini model to use for text generation | gemini-pro |
-| `GEMINI_VISION_MODEL` | The Gemini model to use for image processing | gemini-pro-vision |
+| `GEMINI_MODEL` | The Gemini model to use for text generation | gemini-2.0-flash |
+| `GEMINI_VISION_MODEL` | The Gemini model to use for image processing | gemini-2.5-pro |
 | `PORT` | The port number for the server | 3000 |
 
 ## API Endpoints
