@@ -58,7 +58,7 @@ export async function handleGenerateFromImage(req: Request, headers: Headers) {
 	const imagePart = fileToGenerativePart(imageBuffer, imageFile.type);
 
 	const result = await model.generateContent([text, imagePart]);
-	const response = await result.response;
+	const response = result.response;
 
 	return new Response(
 		JSON.stringify({

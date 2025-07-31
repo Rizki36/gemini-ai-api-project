@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import env from "../config";
+import { fileToGenerativePart } from "../utils";
 
 const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
 
@@ -50,14 +51,12 @@ export async function handleGenerateFromAudio(req: Request, headers: Headers) {
 
 	const model = genAI.getGenerativeModel({ model: env.GEMINI_MODEL });
 
-	const audioPrompt = `
-    Audio file name: ${audioFile.name}
-    Audio type: ${audioFile.type}
-    File size: ${audioFile.size} bytes
-    User prompt: ${text}
-    Process this audio according to the user's request.`;
+	// Convert audio to buffer and then to base64 for the Gemini API
+	const audioBuffer = Buffer.from(await audioFile.arrayBuffer());
+	const audioPart = fileToGenerativePart(audioBuffer, audioFile.type);
 
-	const result = await model.generateContent(audioPrompt);
+	// Send both the text prompt and the audio content to the model
+	const result = await model.generateContent([text, audioPart]);
 	const response = result.response;
 
 	return new Response(

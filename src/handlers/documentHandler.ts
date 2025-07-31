@@ -1,5 +1,6 @@
 import { GoogleGenerativeAI } from "@google/generative-ai";
 import env from "../config";
+import { fileToGenerativePart } from "../utils";
 
 const genAI = new GoogleGenerativeAI(env.GEMINI_API_KEY);
 
@@ -56,13 +57,12 @@ export async function handleGenerateFromDocument(
 
 	const model = genAI.getGenerativeModel({ model: env.GEMINI_MODEL });
 
-	const documentPrompt = `
-    Document name: ${documentFile.name}
-    Document type: ${documentFile.type}
-    User prompt: ${text}
-    Process this document according to the user's request.`;
+	// Convert document to buffer and then to base64 for the Gemini API
+	const documentBuffer = Buffer.from(await documentFile.arrayBuffer());
+	const documentPart = fileToGenerativePart(documentBuffer, documentFile.type);
 
-	const result = await model.generateContent(documentPrompt);
+	// Send both the text prompt and the document content to the model
+	const result = await model.generateContent([text, documentPart]);
 	const response = result.response;
 
 	return new Response(
